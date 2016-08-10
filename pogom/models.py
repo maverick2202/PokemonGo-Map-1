@@ -12,6 +12,9 @@ from playhouse.pool import PooledMySQLDatabase
 from playhouse.shortcuts import RetryOperationalError
 from datetime import datetime, timedelta
 from base64 import b64encode
+import smtplib
+from email.mime.text import MIMEText
+import subprocess
 
 from . import config
 from .utils import get_pokemon_name, get_pokemon_rarity, get_pokemon_types, get_args, send_to_webhook
@@ -287,11 +290,51 @@ class ScannedLocation(BaseModel):
         return scans
 
 
+def send_email(pokemon_name, id, latitude,longitude, expiry_time):
+
+    co_msg = u'{} Id: {} @ http://maps.google.com/maps?q={},{} till {}'.format(pokemon_name,id,latitude,longitude, expiry_time)
+
+    msg = MIMEText(co_msg)
+    msg['Subject'] = co_msg
+    msg['From'] = EMAIL_FROM 
+    msg['To'] = EMAIL_TO
+
+    #Send the message via our own SMTP server, but don't include the
+    # envelope header.
+    s = smtplib.SMTP('smtp.mail.yahoo.com', 587)
+    s.set_debuglevel(1)
+    s.starttls()
+    s.login(EMAIL_FROM,PWD)
+    s.sendmail(EMAIL_FROM, EMAIL_TO , msg.as_string())
+    s.quit()
+
+
+    #command = u"echo http://maps.google.com/maps?q={},{} | mail -s \"{}\" maverick2202@hotmail.com ".format(latitude, longitude, msg)
+
+    log.info(u'Running: {}'.format(msg))
+    #os.system(command)
+    #process = subprocess.Popen(command,
+    #                           stdout=subprocess.PIPE,
+    #                           stderr=subprocess.STDOUT)
+    #out, _ = process.communicate()
+    #if not out:
+    #    out = '<empty>'
+
+    #log.info('STDOUT:\n' + out)
+    #if process.returncode != 0:
+    #    log.error('Command returned %d' % process.returncode)
+    #else:
+    #    log.info('Command returned %d' % process.returncode)
+
+
 def parse_map(map_dict, step_location):
     pokemons = {}
     pokestops = {}
     gyms = {}
     scanned = {}
+    rare_pokemon_ids = [1,2,3,4,5,6,7,29,30,31,32,33,34,35,36,43,44,45,58,60,61,62,66,67,68,69,70,71,72,73,79,80, 88, 92,93,94,89,129]
+    high_cp_pokemon_ids =  [59,103,113,130,131,134,136,142,143,144,145,146,147, 148, 149,150,151]
+
 
     cells = map_dict['responses']['GET_MAP_OBJECTS']['map_cells']
     for cell in cells:
@@ -302,6 +345,16 @@ def parse_map(map_dict, step_location):
                      p['time_till_hidden_ms']) / 1000.0)
                 printPokemon(p['pokemon_data']['pokemon_id'], p['latitude'],
                              p['longitude'], d_t)
+                pokemon_name = ""
+                if (p['pokemon_data']['pokemon_id'] in rare_pokemon_ids) or \
+                    (p['pokemon_data']['pokemon_id'] in high_cp_pokemon_ids): 
+                    pokemon_name = get_pokemon_name(p['pokemon_data']['pokemon_id'])
+                    log.info(u"Pokemon: {} Id# {} ".format(pokemon_name, p['pokemon_data']['pokemon_id']))
+ 
+                if p['pokemon_data']['pokemon_id'] in high_cp_pokemon_ids:
+                    send_email(pokemon_name, p['pokemon_data']['pokemon_id'],p['latitude'],p['longitude'], d_t)
+
+                printPokemon(p['pokemon_data']['pokemon_id'],p['latitude'],p['longitude'],d_t)                
                 pokemons[p['encounter_id']] = {
                     'encounter_id': b64encode(str(p['encounter_id'])),
                     'spawnpoint_id': p['spawn_point_id'],
