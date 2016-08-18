@@ -7,9 +7,26 @@ import shutil
 import logging
 import time
 import re
+import requests
+import ssl
+import json
+
+from distutils.version import StrictVersion
+
+from threading import Thread, Event
+from queue import Queue
+from flask_cors import CORS
+from flask_cache_bust import init_cache_busting
+
+from pogom import config
+from pogom.app import Pogom
+from pogom.utils import get_args, insert_mock_data, get_encryption_lib_path
+
+from pogom.search import search_overseer_thread, search_overseer_thread_ss, fake_search_loop
+from pogom.models import init_database, create_tables, drop_tables, Pokemon
 
 # Currently supported pgoapi
-pgoapi_version = "1.1.6"
+pgoapi_version = "1.1.7"
 
 # Moved here so logger is configured at load time
 logging.basicConfig(format='%(asctime)s [%(threadName)16s][%(module)14s][%(levelname)8s] %(message)s')
@@ -27,28 +44,15 @@ if os.path.isdir(oldpgoapiPath):
 # Assert pgoapi is installed
 try:
     import pgoapi
+    from pgoapi import utilities as util
 except ImportError:
     log.critical("It seems `pgoapi` is not installed. You must run pip install -r requirements.txt again")
     sys.exit(1)
 
-# Assert pgoapi >= 1.1.6 is installed
-from distutils.version import StrictVersion
+# Assert pgoapi >= pgoapi_version
 if not hasattr(pgoapi, "__version__") or StrictVersion(pgoapi.__version__) < StrictVersion(pgoapi_version):
     log.critical("It seems `pgoapi` is not up-to-date. You must run pip install -r requirements.txt again")
     sys.exit(1)
-
-from threading import Thread, Event
-from queue import Queue
-from flask_cors import CORS
-
-from pogom import config
-from pogom.app import Pogom
-from pogom.utils import get_args, insert_mock_data, get_encryption_lib_path
-
-from pogom.search import search_overseer_thread, fake_search_loop
-from pogom.models import init_database, create_tables, drop_tables, Pokemon, Pokestop, Gym
-
-from pgoapi import utilities as util
 
 if __name__ == '__main__':
     # Check if we have the proper encryption library file and get its path
@@ -59,15 +63,15 @@ if __name__ == '__main__':
     args = get_args()
 
     if args.debug:
-        log.setLevel(logging.DEBUG);
+        log.setLevel(logging.DEBUG)
     else:
-        log.setLevel(logging.INFO);
+        log.setLevel(logging.INFO)
 
     # Let's not forget to run Grunt / Only needed when running with webserver
     if not args.no_server:
         if not os.path.exists(os.path.join(os.path.dirname(__file__), 'static/dist')):
-            log.critical('Please run "grunt build" before starting the server');
-            sys.exit();
+            log.critical('Missing front-end assets (static/dist) -- please run "npm install && npm run build" before starting the server')
+            sys.exit()
 
     # These are very noisey, let's shush them up a bit
     logging.getLogger('peewee').setLevel(logging.INFO)
@@ -86,16 +90,25 @@ if __name__ == '__main__':
         logging.getLogger('pgoapi').setLevel(logging.DEBUG)
         logging.getLogger('rpc_api').setLevel(logging.DEBUG)
 
-
     # use lat/lng directly if matches such a pattern
     prog = re.compile("^(\-?\d+\.\d+),?\s?(\-?\d+\.\d+)$")
     res = prog.match(args.location)
     if res:
-        log.debug('Using coords from CLI directly')
+        log.debug('Using coordinates from CLI directly')
         position = (float(res.group(1)), float(res.group(2)), 0)
     else:
-        log.debug('Lookig up coords in API')
+        log.debug('Looking up coordinates in API')
         position = util.get_pos_by_name(args.location)
+
+    # Use the latitude and longitude to get the local altitude from Google
+    try:
+        url = 'https://maps.googleapis.com/maps/api/elevation/json?locations={},{}'.format(
+            str(position[0]), str(position[1]))
+        altitude = requests.get(url).json()[u'results'][0][u'elevation']
+        log.debug('Local altitude is: %sm', altitude)
+        position = (position[0], position[1], altitude)
+    except (requests.exceptions.RequestException, IndexError, KeyError):
+        log.error('Unable to retrieve altitude from Google APIs; setting to 0')
 
     if not any(position):
         log.error('Could not get a position by name, aborting')
@@ -124,7 +137,7 @@ if __name__ == '__main__':
             os.remove(args.db)
     create_tables(db)
 
-    app.set_current_location(position);
+    app.set_current_location(position)
 
     # Control the search status (running or not) across threads
     pause_bit = Event()
@@ -137,8 +150,21 @@ if __name__ == '__main__':
     if not args.only_server:
         # Gather the pokemons!
         if not args.mock:
-            log.debug('Starting a real search thread')
-            search_thread = Thread(target=search_overseer_thread, args=(args, new_location_queue, pause_bit, encryption_lib_path))
+            # check the sort of scan
+            if not args.spawnpoint_scanning:
+                log.debug('Starting a real search thread')
+                search_thread = Thread(target=search_overseer_thread, args=(args, new_location_queue, pause_bit, encryption_lib_path))
+            # using -ss
+            else:
+                if args.dump_spawnpoints:
+                    with open(args.spawnpoint_scanning, 'w+') as file:
+                        log.info('exporting spawns')
+                        spawns = Pokemon.get_spawnpoints_in_hex(position, args.step_limit)
+                        file.write(json.dumps(spawns))
+                        file.close()
+                        log.info('Finished exporting spawns')
+                # start the scan sceduler
+                search_thread = Thread(target=search_overseer_thread_ss, args=(args, new_location_queue, pause_bit, encryption_lib_path))
         else:
             log.debug('Starting a fake search thread')
             insert_mock_data(position)
@@ -149,7 +175,10 @@ if __name__ == '__main__':
         search_thread.start()
 
     if args.cors:
-        CORS(app);
+        CORS(app)
+
+    # No more stale JS
+    init_cache_busting(app)
 
     app.set_search_control(pause_bit)
     app.set_location_queue(new_location_queue)
@@ -162,4 +191,11 @@ if __name__ == '__main__':
         while search_thread.is_alive():
             time.sleep(60)
     else:
-        app.run(threaded=True, use_reloader=False, debug=args.debug, host=args.host, port=args.port)
+        ssl_context = None
+        if args.ssl_certificate and args.ssl_privatekey \
+                and os.path.exists(args.ssl_certificate) and os.path.exists(args.ssl_privatekey):
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_context.load_cert_chain(args.ssl_certificate, args.ssl_privatekey)
+            log.info('Web server in SSL mode.')
+
+        app.run(threaded=True, use_reloader=False, debug=args.debug, host=args.host, port=args.port, ssl_context=ssl_context)
