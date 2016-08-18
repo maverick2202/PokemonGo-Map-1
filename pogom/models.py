@@ -292,7 +292,8 @@ class ScannedLocation(BaseModel):
 
 def send_email(pokemon_name, id, latitude,longitude, expiry_time):
 
-    co_msg = u'{} Id: {} @ http://maps.google.com/maps?q={},{} till {}'.format(pokemon_name,id,latitude,longitude, expiry_time)
+    co_msg = u'{} Id: {} till {}'.format(pokemon_name,id,latitude,longitude, expiry_time)
+    command = u"echo http://maps.google.com/maps?q={},{} | mail -s \"{}\" maverick2202@hotmail.com ".format(latitude, longitude, co_msg)
 
     msg = MIMEText(co_msg)
     msg['Subject'] = co_msg
@@ -309,9 +310,7 @@ def send_email(pokemon_name, id, latitude,longitude, expiry_time):
     s.quit()
 
 
-    #command = u"echo http://maps.google.com/maps?q={},{} | mail -s \"{}\" maverick2202@hotmail.com ".format(latitude, longitude, msg)
-
-    log.info(u'Running: {}'.format(msg))
+    log.info(u'Running: {}'.format(command))
     #os.system(command)
     #process = subprocess.Popen(command,
     #                           stdout=subprocess.PIPE,
@@ -333,7 +332,7 @@ def parse_map(map_dict, step_location):
     gyms = {}
     scanned = {}
     rare_pokemon_ids = [1,2,3,4,5,6,7,29,30,31,32,33,34,35,36,43,44,45,58,60,61,62,66,67,68,69,70,71,72,73,79,80, 88, 92,93,94,89,129]
-    high_cp_pokemon_ids =  [59,103,113,130,131,134,136,142,143,144,145,146,147, 148, 149,150,151]
+    high_cp_pokemon_ids =  [2,3,5,6,8,36,38,51,65,68,83,87,89,94,97,105,110,115,122,132,137,139,141,59,103,113,130,131,134,136,142,143,144,145,146,147, 148, 149,150,151,152]
 
 
     cells = map_dict['responses']['GET_MAP_OBJECTS']['map_cells']
